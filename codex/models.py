@@ -1,49 +1,96 @@
 
 import mongoengine as db
 import textwrap
+import hashlib
+import ssdeep
 from codex.config import ENCRYPTION_KEY
+from itertools import cycle
 
 
+ArchX86 = 'x86'
+ArchX64 = 'x64'
+ArchUnknown = 'unknown'
+
+Architectures = (
+    (ArchX86, 'x86'),
+    (ArchX64, 'x64'),
+    (ArchUnknown, 'Unknown')
+)
+
+SampleTypeLibrary = 'lib'
+SampleTypeExecutable = 'exe'
+SampleTypeDriver = 'driver'
+SampleTypeUnknown = 'unknown'
+SampleTypes = (
+    (SampleTypeLibrary, 'Library'),
+    (SampleTypeExecutable, "Executable"),
+    (SampleTypeDriver, 'Driver'),
+    (SampleTypeUnknown, 'Unknown')
+)
+
+
+def encrypt_blob(blob):
+    return str(
+        bytearray(
+            [ord(k) ^ ord(v) for (k, v) in zip(blob, cycle(ENCRYPTION_KEY))]
+        )
+    )
+
+def decrypt_blob(blob):
+    return encrypt_blob(blob)
 
 
 class Sample(db.Document):
-    md5_digest = db.BinaryField(max_bytes=16)
-    sha1_digest = db.BinaryField(max_bytes=20)
-    sha256_digest = db.BinaryField(max_bytes=32)
+    md5 = db.StringField(max_length=32)
+    sha1 = db.StringField(max_length=40)
+    sha256 = db.StringField(max_length=64)
     ssdeep = db.StringField()
     tags = db.ListField(db.StringField())
     original_name = db.StringField()
     namespace = db.StringField()
-    notes = db.String()
+    notes = db.StringField()
+    arch = db.StringField(choices=Architectures)
+    sample_type = db.StringField(choices=SampleTypes)
     blob = db.FileField()
 
-    @classmethod
-    def hash_to_digest(cls, hash):
-        return bytes([int(c, 16) for c in textwrap.wrap(hash, 2)])
-
-    @property
-    def md5(self):
-        if not hasattr(self, '_md5'):
-            self._md5 = ["{:02x}".format(b) for b in self.md5_digest]
-        return self._md5
-
-    @property
-    def sha1(self):
-        if not hasattr(self, '_sha1'):
-            self._sha1 = ["{:02x}".format(b) for b in self.sha1_digest]
-        return self._sha1
-
-    @property
-    def sha256(self):
-        if not hasattr(self, '_sha256'):
-            self._sha256 = ["{:02x}".format(b) for b in self.sha256_digest]
-        return self._sha256
-
     def decrypt(self):
-        data = self.blob.read()
-        return bytes([k ^ v for (k, v) in zip(data, cycle(ENCRYPTION_KEY))])
+        return decrypt_blob(self.blob.read())
 
     @classmethod
-    def encrypt(cls, data):
-        return bytes([k ^ v for (k, v) in zip(data, cycle(ENCRYPTION_KEY))])
+    def get_or_create(cls, blob, **kwargs):
+        found = False
+        sample = None
 
+        md5 = hashlib.md5(blob).hexdigest()
+        sha1 = hashlib.sha1(blob).hexdigest()
+        sha256 = hashlib.sha256(blob).hexdigest()
+        ssd = ssdeep.hash(blob)
+
+        try:
+            for s in Sample.objects(sha256=sha256):
+                if s.md5 == md5 and s.sha1 == sha1:
+                    found = True
+                    sample = s
+                    break
+        except:
+            raise
+
+        if not found:
+            sample = Sample(
+                sha256=sha256,
+                md5=md5,
+                sha1=sha1,
+                ssdeep=ssd,
+                tags=kwargs.get('tags', []),
+                original_name=kwargs.get('original_name', ''),
+                namespace=kwargs.get('namespace', ''),
+                notes=kwargs.get('notes', ''),
+                arch=kwargs.get('arch', ArchUnknown),
+                sample_type=kwargs.get('sample_type', SampleTypeUnknown)
+            )
+
+        return (found, sample)
+
+    def set_blob(self, blob):
+        self.blob.put(encrypt_blob(blob),
+                      content_type='application/octet-stream')
